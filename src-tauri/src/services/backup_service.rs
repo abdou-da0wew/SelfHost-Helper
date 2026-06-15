@@ -9,6 +9,7 @@ use crate::error::{AppError, AppResult};
 use crate::utils::crypto;
 use crate::utils::path_security;
 use crate::utils::path_security::sanitize_filename;
+use log::info;
 
 pub struct BackupService {
     backup_dir: PathBuf,
@@ -77,6 +78,7 @@ impl BackupService {
         zip.write_all(encrypted_json.as_bytes())
             .map_err(AppError::Io)?;
         zip.finish()?;
+        info!("backup:create path={}", zip_path.display());
         Ok(zip_path)
     }
 
@@ -117,6 +119,7 @@ impl BackupService {
             ));
         }
         let envelope = crypto::decrypt_from_json(&backup_json, passphrase)?;
+        info!("backup:restore path={}", zip_path.display());
         Ok(envelope.payload)
     }
 
@@ -176,6 +179,7 @@ impl BackupService {
         if path.exists() {
             std::fs::remove_file(&path).map_err(AppError::Io)?;
         }
+        info!("backup:delete path={}", path.display());
         Ok(())
     }
 }

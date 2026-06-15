@@ -14,86 +14,65 @@ pub struct LspRequest {
     pub params: serde_json::Value,
 }
 
-pub struct LspBridge {
-    sessions: Arc<RwLock<HashMap<String, LspSession>>>,
-    proxy_port: Arc<RwLock<Option<u16>>>,
-}
-
-struct LspSession {
+pub(crate) struct LspSession {
     child: Child,
     stdin_tx: mpsc::Sender<Vec<u8>>,
     pending: Arc<RwLock<HashMap<u64, oneshot::Sender<serde_json::Value>>>>,
     next_id: Arc<RwLock<u64>>,
 }
 
-impl LspBridge {
+impl LspSession {
+    async fn request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let mut id_guard = self.next_id.write().await;
+        let id = *id_guard;
+        *id_guard += 1;
+        drop(id_guard);
+
+        let (tx, rx) = oneshot::channel();
+        self.pending.write().await.insert(id, tx);
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+
+        let body = request.to_string();
+        let message = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        self.stdin_tx
+            .send(message.into_bytes())
+            .await
+            .map_err(|e| format!("Failed to send: {}", e))?;
+
+        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(_)) => Err("Channel closed".into()),
+            Err(_) => {
+                self.pending.write().await.remove(&id);
+                Err("Request timed out".into())
+            }
+        }
+    }
+}
+
+pub struct LspSessionManager {
+    sessions: Arc<RwLock<HashMap<String, LspSession>>>,
+}
+
+impl LspSessionManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            proxy_port: Arc::new(RwLock::new(None)),
         }
     }
 
-    pub async fn start_proxy(&self) -> Result<u16, String> {
-        let mut port_guard = self.proxy_port.write().await;
-        if let Some(port) = *port_guard {
-            return Ok(port);
-        }
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|e| format!("Failed to bind proxy: {}", e))?;
-        let port = listener
-            .local_addr()
-            .map_err(|e| format!("Failed to get addr: {}", e))?
-            .port();
-
-        let sessions = self.sessions.clone();
-        tokio::spawn(async move {
-            loop {
-                let (socket, _) = match listener.accept().await {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                let sessions = sessions.clone();
-                tokio::spawn(async move {
-                    let ws_stream = match tokio_tungstenite::accept_async(socket).await {
-                        Ok(s) => s,
-                        Err(_) => return,
-                    };
-                    let (mut ws_sink, mut ws_stream) = ws_stream.split();
-                    while let Some(msg) = ws_stream.next().await {
-                        let msg = match msg {
-                            Ok(m) => m,
-                            Err(_) => break,
-                        };
-                        if msg.is_text() {
-                            let text = msg.to_text().unwrap_or("");
-                            if let Ok(req) = serde_json::from_str::<LspRequest>(text) {
-                                let sessions = sessions.read().await;
-                                if let Some((_, session)) = sessions.iter().next() {
-                                    let result =
-                                        session.request(&req.method, req.params).await;
-                                    let response = serde_json::json!({
-                                        "jsonrpc": "2.0",
-                                        "id": req.id,
-                                        "result": result,
-                                    });
-                                    let _ = ws_sink
-                                        .send(tokio_tungstenite::tungstenite::Message::Text(
-                                            response.to_string(),
-                                        ))
-                                        .await;
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-        });
-
-        *port_guard = Some(port);
-        Ok(port)
+    pub(crate) fn sessions(&self) -> Arc<RwLock<HashMap<String, LspSession>>> {
+        self.sessions.clone()
     }
 
     pub async fn start_server(
@@ -225,41 +204,78 @@ impl LspBridge {
     }
 }
 
-impl LspSession {
-    async fn request(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
-        let mut id_guard = self.next_id.write().await;
-        let id = *id_guard;
-        *id_guard += 1;
-        drop(id_guard);
+pub struct LspProxy {
+    sessions: Arc<RwLock<HashMap<String, LspSession>>>,
+    proxy_port: Arc<RwLock<Option<u16>>>,
+}
 
-        let (tx, rx) = oneshot::channel();
-        self.pending.write().await.insert(id, tx);
+impl LspProxy {
+    pub(crate) fn new(sessions: Arc<RwLock<HashMap<String, LspSession>>>) -> Self {
+        Self {
+            sessions,
+            proxy_port: Arc::new(RwLock::new(None)),
+        }
+    }
 
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
+    pub async fn start(&self) -> Result<u16, String> {
+        let mut port_guard = self.proxy_port.write().await;
+        if let Some(port) = *port_guard {
+            return Ok(port);
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("Failed to bind proxy: {}", e))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| format!("Failed to get addr: {}", e))?
+            .port();
+
+        let sessions = self.sessions.clone();
+        tokio::spawn(async move {
+            loop {
+                let (socket, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let sessions = sessions.clone();
+                tokio::spawn(async move {
+                    let ws_stream = match tokio_tungstenite::accept_async(socket).await {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                    let (mut ws_sink, mut ws_stream) = ws_stream.split();
+                    while let Some(msg) = ws_stream.next().await {
+                        let msg = match msg {
+                            Ok(m) => m,
+                            Err(_) => break,
+                        };
+                        if msg.is_text() {
+                            let text = msg.to_text().unwrap_or("");
+                            if let Ok(req) = serde_json::from_str::<LspRequest>(text) {
+                                let sessions = sessions.read().await;
+                                if let Some((_, session)) = sessions.iter().next() {
+                                    let result =
+                                        session.request(&req.method, req.params).await;
+                                    let response = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": req.id,
+                                        "result": result,
+                                    });
+                                    let _ = ws_sink
+                                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                                            response.to_string(),
+                                        ))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
         });
 
-        let body = request.to_string();
-        let message = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-        self.stdin_tx
-            .send(message.into_bytes())
-            .await
-            .map_err(|e| format!("Failed to send: {}", e))?;
-
-        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-            Ok(Ok(result)) => Ok(result),
-            Ok(Err(_)) => Err("Channel closed".into()),
-            Err(_) => {
-                self.pending.write().await.remove(&id);
-                Err("Request timed out".into())
-            }
-        }
+        *port_guard = Some(port);
+        Ok(port)
     }
 }

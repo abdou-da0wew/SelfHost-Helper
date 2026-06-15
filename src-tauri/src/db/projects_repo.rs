@@ -130,10 +130,11 @@ impl ProjectsRepo {
         let mut stmt = conn.prepare(
             "SELECT id, name, path, category_id, tags, icon
              FROM projects
-             WHERE name LIKE ?1 OR path LIKE ?1 OR tags LIKE ?1
+             WHERE name LIKE ?1 ESCAPE '\\' OR path LIKE ?1 ESCAPE '\\' OR tags LIKE ?1 ESCAPE '\\'
              ORDER BY name ASC",
         )?;
-        let pattern = format!("%{}%", query);
+        let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let pattern = format!("%{}%", escaped);
         let rows = stmt.query_map(params![pattern], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, i64>(0)?,

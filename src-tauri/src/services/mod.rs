@@ -1,3 +1,4 @@
+pub mod audit_logger;
 pub mod backup_service;
 pub mod file_watcher;
 pub mod git_service;

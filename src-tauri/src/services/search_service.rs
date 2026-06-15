@@ -51,6 +51,22 @@ impl SearchService {
             return Err(AppError::Search("Search query cannot be empty".into()));
         }
 
+        if regex_mode {
+            let pat = query.to_string();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::task::spawn_blocking(move || {
+                    regex::RegexBuilder::new(&pat)
+                        .size_limit(1_048_576)
+                        .build()
+                }),
+            )
+            .await
+            .map_err(|_| AppError::Search("Regex pattern too complex".into()))?
+            .map_err(|_| AppError::Search("Regex compilation failed".into()))?
+            .map_err(|e| AppError::Search(format!("Invalid regex: {}", e)))?;
+        }
+
         let mut args = vec![
             "--json".to_string(),
             "--line-number".to_string(),

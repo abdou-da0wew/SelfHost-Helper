@@ -161,7 +161,7 @@ impl GitService {
     pub fn unstage_file(&self, project_path: &str, file_path: &str) -> AppResult<()> {
         let repo = self.get_repo(project_path)?;
         let head = repo.head()?.peel_to_commit()?;
-        repo.reset_default(Some(head.as_object()), &[Path::new(file_path)])
+        repo.reset_default(Some(head.as_object()), [Path::new(file_path)])
             .map_err(|e| AppError::Git(format!("Failed to unstage file: {}", e)))?;
         Ok(())
     }
@@ -287,14 +287,12 @@ impl GitService {
     pub fn get_remotes(&self, project_path: &str) -> AppResult<Vec<GitRemote>> {
         let repo = self.get_repo(project_path)?;
         let mut remotes = Vec::new();
-        for remote_result in repo.remotes()?.iter() {
-            if let Some(name) = remote_result {
-                if let Ok(remote) = repo.find_remote(name) {
-                    remotes.push(GitRemote {
-                        name: name.to_string(),
-                        url: remote.url().unwrap_or_default().to_string(),
-                    });
-                }
+        for name in repo.remotes()?.iter().flatten() {
+            if let Ok(remote) = repo.find_remote(name) {
+                remotes.push(GitRemote {
+                    name: name.to_string(),
+                    url: remote.url().unwrap_or_default().to_string(),
+                });
             }
         }
         Ok(remotes)
@@ -311,26 +309,24 @@ impl GitService {
         let head = repo.head()?.peel_to_tree()?;
         let mut opts = DiffOptions::new();
         let diff = repo.diff_tree_to_workdir(Some(&head), Some(&mut opts))?;
-        let mut entries = Vec::new();
-        for delta_idx in 0..diff.deltas().len() {
-            let delta = diff
-                .deltas()
-                .nth(delta_idx)
-                .ok_or_else(|| AppError::Internal("bad delta index".into()))?;
-            let path = delta
-                .new_file()
-                .path()
-                .or_else(|| delta.old_file().path())
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let status = format_diff_status(delta.status());
-            entries.push(GitDiffEntry {
-                path,
-                status,
-                insertions: 0,
-                deletions: 0,
-            });
-        }
+        let entries: Vec<GitDiffEntry> = diff
+            .deltas()
+            .map(|delta| {
+                let path = delta
+                    .new_file()
+                    .path()
+                    .or_else(|| delta.old_file().path())
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let status = format_diff_status(delta.status());
+                GitDiffEntry {
+                    path,
+                    status,
+                    insertions: 0,
+                    deletions: 0,
+                }
+            })
+            .collect();
         Ok(entries)
     }
 
@@ -408,20 +404,18 @@ impl GitService {
     pub fn get_tags(&self, project_path: &str) -> AppResult<Vec<GitTag>> {
         let repo = self.get_repo(project_path)?;
         let mut tags = Vec::new();
-        for tag_result in &repo.tag_names(None)? {
-            if let Some(name) = tag_result {
-                if let Ok(reference) = repo.find_reference(&format!("refs/tags/{}", name)) {
-                    if let Ok(commit) = reference.peel_to_commit() {
-                        tags.push(GitTag {
-                            name: name.to_string(),
-                            target_oid: commit.id().to_string(),
-                            message: reference
-                                .peel(git2::ObjectType::Any)
-                                .ok()
-                                .and_then(|obj| obj.peel_to_tag().ok())
-                                .and_then(|tag| tag.message().map(|s| s.to_string())),
-                        });
-                    }
+        for name in (&repo.tag_names(None)?).into_iter().flatten() {
+            if let Ok(reference) = repo.find_reference(&format!("refs/tags/{}", name)) {
+                if let Ok(commit) = reference.peel_to_commit() {
+                    tags.push(GitTag {
+                        name: name.to_string(),
+                        target_oid: commit.id().to_string(),
+                        message: reference
+                            .peel(git2::ObjectType::Any)
+                            .ok()
+                            .and_then(|obj| obj.peel_to_tag().ok())
+                            .and_then(|tag| tag.message().map(|s| s.to_string())),
+                    });
                 }
             }
         }

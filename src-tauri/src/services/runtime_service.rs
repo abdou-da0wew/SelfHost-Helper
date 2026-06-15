@@ -25,7 +25,7 @@ fn validate_version_string(version: &str) -> AppResult<()> {
     if !version
         .chars()
         .next()
-        .map_or(false, |c| c.is_ascii_digit())
+        .is_some_and(|c| c.is_ascii_digit())
     {
         return Err(AppError::Validation(
             "Version string must start with a digit".into(),
@@ -67,17 +67,16 @@ impl RuntimeService {
 
     async fn list_versions(&self, base_dir: &Path) -> AppResult<Vec<String>> {
         let mut versions = Vec::new();
-        if base_dir.exists() {
-            for entry in std::fs::read_dir(base_dir).map_err(AppError::Io)? {
-                let entry = entry.map_err(AppError::Io)?;
-                if entry
-                    .file_type()
-                    .map_err(AppError::Io)?
-                    .is_dir()
-                {
-                    versions.push(entry.file_name().to_string_lossy().to_string());
+        match tokio::fs::read_dir(base_dir).await {
+            Ok(mut entries) => {
+                while let Some(entry) = entries.next_entry().await.map_err(AppError::Io)? {
+                    if entry.file_type().await.map_err(AppError::Io)?.is_dir() {
+                        versions.push(entry.file_name().to_string_lossy().to_string());
+                    }
                 }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(AppError::Io(e)),
         }
         versions.sort();
         Ok(versions)
@@ -90,18 +89,14 @@ impl RuntimeService {
     ) -> AppResult<PathBuf> {
         validate_version_string(version)?;
         let target_dir = self.node_versions_dir.join(version);
-        if target_dir.exists() {
+        if tokio::fs::metadata(&target_dir).await.is_ok() {
             return Ok(target_dir);
         }
-        std::fs::create_dir_all(&target_dir).map_err(AppError::Io)?;
+        tokio::fs::create_dir_all(&target_dir)
+            .await
+            .map_err(AppError::Io)?;
 
-        let url = match self.get_node_download_url(version) {
-            Ok(u) => u,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&target_dir);
-                return Err(e);
-            }
-        };
+        let url = self.get_node_download_url(version)?;
 
         if let Some(tx) = &progress_tx {
             let _ = tx
@@ -113,19 +108,25 @@ impl RuntimeService {
                 .await;
         }
 
-        let response = reqwest::get(&url).await.map_err(|e| {
-            let _ = std::fs::remove_dir_all(&target_dir);
-            AppError::Http(e)
-        })?;
-        let bytes = response.bytes().await.map_err(|e| {
-            let _ = std::fs::remove_dir_all(&target_dir);
-            AppError::Http(e)
-        })?;
+        let response = match reqwest::get(&url).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                return Err(AppError::Http(e));
+            }
+        };
+        let bytes = match response.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                return Err(AppError::Http(e));
+            }
+        };
         let zip_path = target_dir.with_extension("zip");
-        std::fs::write(&zip_path, &bytes).map_err(|e| {
-            let _ = std::fs::remove_dir_all(&target_dir);
-            AppError::Io(e)
-        })?;
+        if let Err(e) = tokio::fs::write(&zip_path, &bytes).await {
+            let _ = tokio::fs::remove_dir_all(&target_dir).await;
+            return Err(AppError::Io(e));
+        }
 
         if let Some(tx) = &progress_tx {
             let _ = tx
@@ -137,21 +138,42 @@ impl RuntimeService {
                 .await;
         }
 
-        let extract_result = {
-            let file = std::fs::File::open(&zip_path).map_err(AppError::Io)?;
+        let extract_target = target_dir.clone();
+        let extract_zip = zip_path.clone();
+        let extract_result = tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let file = std::fs::File::open(&extract_zip).map_err(AppError::Io)?;
             let mut archive =
                 zip::ZipArchive::new(file).map_err(|e| AppError::Internal(e.to_string()))?;
             archive
-                .extract(&target_dir)
+                .extract(&extract_target)
                 .map_err(|e| AppError::Internal(e.to_string()))
-        };
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        let _ = std::fs::remove_file(&zip_path);
+        let _ = tokio::fs::remove_file(&zip_path).await;
 
         if let Err(e) = extract_result {
-            let _ = std::fs::remove_dir_all(&target_dir);
+            let _ = tokio::fs::remove_dir_all(&target_dir).await;
             return Err(e);
         }
+
+        // Verify the downloaded binary
+        let verify_target = target_dir.clone();
+        let node_name = if cfg!(windows) {
+            "node.exe"
+        } else {
+            "node"
+        };
+        let node_binary = tokio::task::spawn_blocking(move || {
+            find_binary(&verify_target, node_name)
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| {
+            AppError::Runtime("Node.js binary not found after extraction".into())
+        })?;
+        verify_binary(&node_binary).await?;
 
         if let Some(tx) = &progress_tx {
             let _ = tx
@@ -173,18 +195,14 @@ impl RuntimeService {
     ) -> AppResult<PathBuf> {
         validate_version_string(version)?;
         let target_dir = self.python_versions_dir.join(version);
-        if target_dir.exists() {
+        if tokio::fs::metadata(&target_dir).await.is_ok() {
             return Ok(target_dir);
         }
-        std::fs::create_dir_all(&target_dir).map_err(AppError::Io)?;
+        tokio::fs::create_dir_all(&target_dir)
+            .await
+            .map_err(AppError::Io)?;
 
-        let url = match self.get_python_download_url(version) {
-            Ok(u) => u,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&target_dir);
-                return Err(e);
-            }
-        };
+        let url = self.get_python_download_url(version)?;
 
         if let Some(tx) = &progress_tx {
             let _ = tx
@@ -196,19 +214,25 @@ impl RuntimeService {
                 .await;
         }
 
-        let response = reqwest::get(&url).await.map_err(|e| {
-            let _ = std::fs::remove_dir_all(&target_dir);
-            AppError::Http(e)
-        })?;
-        let bytes = response.bytes().await.map_err(|e| {
-            let _ = std::fs::remove_dir_all(&target_dir);
-            AppError::Http(e)
-        })?;
+        let response = match reqwest::get(&url).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                return Err(AppError::Http(e));
+            }
+        };
+        let bytes = match response.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                return Err(AppError::Http(e));
+            }
+        };
         let zip_path = target_dir.with_extension("zip");
-        std::fs::write(&zip_path, &bytes).map_err(|e| {
-            let _ = std::fs::remove_dir_all(&target_dir);
-            AppError::Io(e)
-        })?;
+        if let Err(e) = tokio::fs::write(&zip_path, &bytes).await {
+            let _ = tokio::fs::remove_dir_all(&target_dir).await;
+            return Err(AppError::Io(e));
+        }
 
         if let Some(tx) = &progress_tx {
             let _ = tx
@@ -220,21 +244,42 @@ impl RuntimeService {
                 .await;
         }
 
-        let extract_result = {
-            let file = std::fs::File::open(&zip_path).map_err(AppError::Io)?;
+        let extract_target = target_dir.clone();
+        let extract_zip = zip_path.clone();
+        let extract_result = tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let file = std::fs::File::open(&extract_zip).map_err(AppError::Io)?;
             let mut archive =
                 zip::ZipArchive::new(file).map_err(|e| AppError::Internal(e.to_string()))?;
             archive
-                .extract(&target_dir)
+                .extract(&extract_target)
                 .map_err(|e| AppError::Internal(e.to_string()))
-        };
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        let _ = std::fs::remove_file(&zip_path);
+        let _ = tokio::fs::remove_file(&zip_path).await;
 
         if let Err(e) = extract_result {
-            let _ = std::fs::remove_dir_all(&target_dir);
+            let _ = tokio::fs::remove_dir_all(&target_dir).await;
             return Err(e);
         }
+
+        // Verify the downloaded binary
+        let verify_target = target_dir.clone();
+        let python_name = if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python3"
+        };
+        let python_binary = tokio::task::spawn_blocking(move || {
+            find_binary(&verify_target, python_name)
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| {
+            AppError::Runtime("Python binary not found after extraction".into())
+        })?;
+        verify_binary(&python_binary).await?;
 
         if let Some(tx) = &progress_tx {
             let _ = tx
@@ -257,7 +302,7 @@ impl RuntimeService {
             _ => return Err(AppError::Validation("Unknown runtime".into())),
         };
         let target = base_dir.join(version);
-        match std::fs::remove_dir_all(&target) {
+        match tokio::fs::remove_dir_all(&target).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(AppError::Io(e)),
@@ -339,6 +384,7 @@ impl RuntimeService {
             ("macos", "x86_64") => ("macos", "x86_64"),
             ("macos", "aarch64") => ("macos", "aarch64"),
             ("windows", "x86_64") => ("win", "amd64"),
+            ("windows", "aarch64") => ("win", "arm64"),
             _ => {
                 return Err(AppError::Runtime(format!(
                     "Unsupported platform: {}-{}",
@@ -346,11 +392,66 @@ impl RuntimeService {
                 )))
             }
         };
+        let suffix = format!("{}-{}", os_name, arch_name);
         Ok(format!(
             "https://www.python.org/ftp/python/{}/python-{}-{}.zip",
-            version,
-            version,
-            format!("{}-{}", os_name, arch_name)
+            version, version, suffix
         ))
     }
+}
+
+fn find_binary(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&current) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    stack.push(path);
+                } else if entry.file_name().to_string_lossy() == name {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn verify_binary(binary_path: &std::path::Path) -> AppResult<()> {
+    let metadata = tokio::fs::metadata(binary_path).await.map_err(|e| {
+        AppError::Runtime(format!("Binary not found after download: {}", e))
+    })?;
+    if !metadata.is_file() {
+        return Err(AppError::Runtime("Binary path is not a file".into()));
+    }
+    if metadata.len() == 0 {
+        return Err(AppError::Runtime("Downloaded binary is empty".into()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = metadata.permissions();
+        if perms.mode() & 0o111 == 0 {
+            return Err(AppError::Runtime(
+                "Downloaded binary is not executable".into(),
+            ));
+        }
+        let mut magic = [0u8; 4];
+        let mut file = tokio::fs::File::open(binary_path)
+            .await
+            .map_err(AppError::Io)?;
+        tokio::io::AsyncReadExt::read_exact(&mut file, &mut magic)
+            .await
+            .map_err(AppError::Io)?;
+        if magic != [0x7f, 0x45, 0x4c, 0x46] {
+            let _ = tokio::fs::remove_file(binary_path).await;
+            return Err(AppError::Runtime(
+                "Downloaded binary is not a valid ELF file".into(),
+            ));
+        }
+    }
+    Ok(())
 }

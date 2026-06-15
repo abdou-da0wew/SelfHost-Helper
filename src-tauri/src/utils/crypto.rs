@@ -3,11 +3,11 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use chrono::Utc;
 use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::time::SystemTime;
 
 const KDF_ITERATIONS: u32 = 600_000;
 const KEY_LEN: usize = 32;
@@ -123,7 +123,10 @@ pub fn encrypt_envelope(
         return Err(CryptoError::Cipher("ciphertext shorter than tag".into()));
     }
     let (encrypted_data, auth_tag) = ciphertext.split_at(ciphertext.len() - tag_len);
-    let created_at = envelope.created_at.clone().unwrap_or_else(now_iso8601);
+    let created_at = envelope
+        .created_at
+        .clone()
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
     Ok(EncryptedBackup {
         version: CURRENT_VERSION,
         kdf: KdfInfo {
@@ -185,7 +188,7 @@ pub fn encrypt_to_json(
 ) -> Result<String, CryptoError> {
     let envelope = BackupEnvelope {
         version: CURRENT_VERSION,
-        created_at: Some(now_iso8601()),
+        created_at: Some(Utc::now().to_rfc3339()),
         app,
         payload,
     };
@@ -196,22 +199,4 @@ pub fn encrypt_to_json(
 pub fn decrypt_from_json(json: &str, passphrase: &str) -> Result<BackupEnvelope, CryptoError> {
     let backup: EncryptedBackup = serde_json::from_str(json)?;
     decrypt_backup(&backup, passphrase)
-}
-
-fn now_iso8601() -> String {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| {
-            let secs = d.as_secs();
-            format!(
-                "{}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                1970 + (secs / 31_536_000) as u32,
-                ((secs % 31_536_000) / 2_592_000) as u32 + 1,
-                ((secs % 2_592_000) / 86_400) as u32 + 1,
-                (secs % 86_400) / 3600,
-                (secs % 3600) / 60,
-                secs % 60,
-            )
-        })
-        .unwrap_or_default()
 }

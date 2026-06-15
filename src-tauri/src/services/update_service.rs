@@ -1,4 +1,5 @@
 use crate::error::{AppError, AppResult};
+use log::info;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::Emitter;
@@ -44,6 +45,7 @@ impl UpdateService {
     }
 
     pub async fn check_for_updates(&self) -> AppResult<Option<UpdateInfo>> {
+        info!("update:check");
         let _permit = self
             .check_guard
             .acquire()
@@ -102,6 +104,7 @@ impl UpdateService {
     }
 
     pub async fn download_and_install(&self) -> AppResult<()> {
+        info!("update:install");
         let current_update = self.status.read().await.update.clone();
         *self.status.write().await = UpdateStatus {
             status: "downloading".into(),

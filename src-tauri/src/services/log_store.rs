@@ -34,16 +34,13 @@ impl LogStore {
     pub async fn push(&self, key: String, entry: LogEntry) -> Vec<LogBatch> {
         {
             let mut history = self.history.write().await;
-            let hist = history.entry(key.clone()).or_default();
+            let hist = history.entry(key).or_default();
             hist.push(entry.clone());
             Self::trim_history(hist);
         }
 
         let mut queue = self.batch_queue.write().await;
-        queue.push(LogEntry {
-            key: key.clone(),
-            ..entry
-        });
+        queue.push(entry);
 
         let mut batches = Vec::new();
         if queue.len() >= 50 {

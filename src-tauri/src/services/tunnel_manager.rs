@@ -6,6 +6,18 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::error::{AppError, AppResult};
 use crate::utils::sidecar::resolve_sidecar;
+use log::{info, warn};
+
+const ALLOWED_TUNNEL_CONFIG_KEYS: &[&str] = &[
+    "hostname",
+    "protocol",
+    "headers",
+    "origin",
+    "proxy-type",
+    "target",
+    "heartbeat-interval",
+    "heartbeat-tolerance",
+];
 
 struct TunnelInstance {
     #[allow(dead_code)]
@@ -77,6 +89,8 @@ impl TunnelManager {
             }
         }
 
+        info!("tunnel:start project={}", &project_id);
+
         self.send_status(&project_id, "connecting", None, None, None)
             .await;
 
@@ -96,6 +110,14 @@ impl TunnelManager {
             args.push(tok);
 
             if let Some(cfg) = &config {
+                for key in cfg.keys() {
+                    if !ALLOWED_TUNNEL_CONFIG_KEYS.contains(&key.as_str()) {
+                        return Err(AppError::Validation(format!(
+                            "Unknown tunnel config key: '{}'",
+                            key
+                        )));
+                    }
+                }
                 if let Some(proto) = cfg.get("protocol") {
                     if !proto.chars().all(|c| c.is_ascii_alphanumeric()) {
                         return Err(AppError::Validation(
@@ -105,15 +127,10 @@ impl TunnelManager {
                     args.push("--protocol".to_string());
                     args.push(proto.clone());
                 }
-                if let Some(true_str) = cfg.get("noTLSVerify") {
-                    if true_str == "true" {
-                        args.push("--no-tls-verify".to_string());
-                    }
-                }
-                if let Some(host) = cfg.get("httpHostHeader") {
+                if let Some(host) = cfg.get("hostname") {
                     if host.is_empty() || host.len() > 253 {
                         return Err(AppError::Validation(
-                            "Invalid HTTP host header".into(),
+                            "Invalid hostname".into(),
                         ));
                     }
                     args.push("--http-host-header".to_string());
@@ -156,21 +173,19 @@ impl TunnelManager {
             let mut child_died = false;
             if let Some(inst) = running_ref.write().await.get_mut(&pid_clone) {
                 if let Some(ref mut child) = inst.child {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            let _ = event_tx
-                                .send(TunnelStatus {
-                                    project_id: pid_clone.clone(),
-                                    status: "error".into(),
-                                    url: None,
-                                    port: None,
-                                    error: Some(format!("cloudflared exited with {}", status)),
-                                })
-                                .await;
-                            running_ref.write().await.remove(&pid_clone);
-                            child_died = true;
-                        }
-                        _ => {}
+                    if let Ok(Some(status)) = child.try_wait() {
+                        warn!("tunnel:crashed project={} exit={}", pid_clone, status);
+                        let _ = event_tx
+                            .send(TunnelStatus {
+                                project_id: pid_clone.clone(),
+                                status: "error".into(),
+                                url: None,
+                                port: None,
+                                error: Some(format!("cloudflared exited with {}", status)),
+                            })
+                            .await;
+                        running_ref.write().await.remove(&pid_clone);
+                        child_died = true;
                     }
                 }
             }
@@ -207,6 +222,8 @@ impl TunnelManager {
         if !exists {
             return Err(AppError::NotFound("No tunnel running".into()));
         }
+
+        info!("tunnel:stop project={}", project_id);
 
         if let Some(mut child) = child_to_kill {
             child

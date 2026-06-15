@@ -6,7 +6,7 @@ use crate::error::AppError;
 
 pub fn establish_connection(db_path: &Path) -> Result<Arc<Mutex<Connection>>, AppError> {
     if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| AppError::Io(e))?;
+        std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     }
     let conn = Connection::open(db_path).map_err(|e| AppError::Database(e.to_string()))?;
     conn.execute_batch(

@@ -106,7 +106,7 @@ pub fn parse_media_url(
     } else {
         let file_path = if !hostname.is_empty()
             && hostname.len() == 1
-            && hostname.chars().next().map_or(false, |c| c.is_ascii_alphabetic())
+            && hostname.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
         {
             PathBuf::from(format!("{}:{}", hostname, decoded))
         } else {
@@ -144,6 +144,38 @@ pub fn sanitize_filename(value: &str) -> String {
         "project".to_string()
     } else {
         trimmed.chars().take(120).collect()
+    }
+}
+
+#[allow(dead_code)]
+pub fn normalize_path_case(path: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let mut result = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(name) => {
+                    let name_lower = name.to_string_lossy().to_lowercase();
+                    let found = std::fs::read_dir(&result).ok().and_then(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .find(|e| {
+                                e.file_name().to_string_lossy().to_lowercase() == name_lower
+                            })
+                            .map(|e| e.file_name())
+                    });
+                    result.push(found.as_deref().unwrap_or(name));
+                }
+                _ => {
+                    result.push(component.as_os_str());
+                }
+            }
+        }
+        result
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        path.to_path_buf()
     }
 }
 
