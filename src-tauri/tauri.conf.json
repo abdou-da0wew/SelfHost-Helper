@@ -1,6 +1,6 @@
 {
   "productName": "SelfHost Helper",
-  "version": "0.40.1",
+  "version": "0.41.0",
   "identifier": "com.selfhosthelper.app",
   "build": {
     "beforeDevCommand": "npm run dev:react",
@@ -61,15 +61,7 @@
       ]
     },
     "shell": {
-      "open": true,
-      "scope": [
-        { "name": "cloudflared", "cmd": "cloudflared", "args": true },
-        { "name": "rg", "cmd": "rg", "args": true },
-        { "name": "node", "cmd": "node", "args": true },
-        { "name": "python", "cmd": "python3", "args": true },
-        { "name": "typescript-language-server", "cmd": "typescript-language-server", "args": true },
-        { "name": "git", "cmd": "git", "args": true }
-      ]
+      "open": true
     }
   }
 }
