@@ -86,9 +86,10 @@ impl UpdateService {
     }
 
     pub async fn download_and_install(&self) -> AppResult<()> {
+        let current_update = self.status.read().await.update.clone();
         *self.status.write().await = UpdateStatus {
             status: "downloading".into(),
-            update: self.status.read().await.update.clone(),
+            update: current_update,
             error: None,
         };
 

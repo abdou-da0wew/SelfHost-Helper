@@ -94,14 +94,15 @@ impl ProjectsRepo {
         tags: Option<&str>,
         icon: Option<&str>,
     ) -> AppResult<()> {
-        let current = self.get_by_id(id)?;
-        if current.is_none() {
-            return Err(crate::error::AppError::NotFound(format!(
-                "Project {} not found",
-                id
-            )));
-        }
-        let current = current.unwrap();
+        let current = match self.get_by_id(id)? {
+            Some(c) => c,
+            None => {
+                return Err(crate::error::AppError::NotFound(format!(
+                    "Project {} not found",
+                    id
+                )))
+            }
+        };
         let new_name = name.unwrap_or(current["name"].as_str().unwrap_or(""));
         let new_path = path.unwrap_or(current["path"].as_str().unwrap_or(""));
         let new_tags = tags.or_else(|| current["tags"].as_str());

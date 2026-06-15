@@ -46,8 +46,6 @@ uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 log = "0.4"
 url = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 semver = "1"
 shlex = "1"
 opener = "0.7"

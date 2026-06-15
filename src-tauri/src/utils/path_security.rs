@@ -111,7 +111,7 @@ pub fn parse_media_url(
     } else {
         let file_path = if !hostname.is_empty()
             && hostname.len() == 1
-            && hostname.chars().next().unwrap().is_ascii_alphabetic()
+            && hostname.chars().next().map_or(false, |c| c.is_ascii_alphabetic())
         {
             PathBuf::from(format!("{}:{}", hostname, decoded))
         } else {

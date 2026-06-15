@@ -6,10 +6,13 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuild
 
 pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let menu = build_menu(app)?;
-    let _tray = TrayIconBuilder::new()
-        .icon(app.default_window_icon().cloned().unwrap())
+    let mut tray_builder = TrayIconBuilder::new()
         .tooltip("SelfHost Helper")
-        .menu(&menu)
+        .menu(&menu);
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray_builder = tray_builder.icon(icon);
+    }
+    let _tray = tray_builder
         .on_menu_event(move |app, event| {
             handle_menu_event(app, &event.id().0);
         })

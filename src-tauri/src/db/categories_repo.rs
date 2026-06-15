@@ -60,14 +60,15 @@ impl CategoriesRepo {
     }
 
     pub fn update(&self, id: i64, name: Option<&str>, color: Option<&str>) -> AppResult<()> {
-        let current = self.get_by_id(id)?;
-        if current.is_none() {
-            return Err(crate::error::AppError::NotFound(format!(
-                "Category {} not found",
-                id
-            )));
-        }
-        let current = current.unwrap();
+        let current = match self.get_by_id(id)? {
+            Some(c) => c,
+            None => {
+                return Err(crate::error::AppError::NotFound(format!(
+                    "Category {} not found",
+                    id
+                )))
+            }
+        };
         let new_name = name.unwrap_or(current["name"].as_str().unwrap_or(""));
         let new_color = color.or_else(|| current["color"].as_str());
         let conn = self.db.lock().map_err(|e| AppError::Database(e.to_string()))?;

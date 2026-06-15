@@ -49,10 +49,6 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter("info,selfhost_helper=debug")
-        .init();
-
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -70,7 +66,9 @@ pub fn run() {
                 .app_data_dir()
                 .unwrap_or_default();
             let db_path = app_base.join("data").join("projects.sqlite");
-            std::fs::create_dir_all(db_path.parent().unwrap()).ok();
+            if let Some(parent) = db_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
             let db = establish_connection(&db_path)?;
             let projects_repo = Arc::new(ProjectsRepo::new(db.clone()));
             let categories_repo = Arc::new(CategoriesRepo::new(db.clone()));
@@ -82,7 +80,10 @@ pub fn run() {
             let runtime_service = Arc::new(RuntimeService::new());
             let media_allowlist = Arc::new(MediaAllowlist::new());
             let log_store = Arc::new(LogStore::new());
-            let (tunnel_manager, _tunnel_rx) = TunnelManager::new(handle.clone());
+            let (tunnel_manager, mut tunnel_rx) = TunnelManager::new(handle.clone());
+            tokio::spawn(async move {
+                while tunnel_rx.recv().await.is_some() {}
+            });
             let backup_dir = app_base.join("backups");
             let backup_service = Arc::new(BackupService::new(
                 backup_dir,
