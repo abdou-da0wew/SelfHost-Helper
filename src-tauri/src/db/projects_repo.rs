@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 pub struct ProjectsRepo {
     db: Arc<Mutex<Connection>>,
@@ -94,30 +94,21 @@ impl ProjectsRepo {
         tags: Option<&str>,
         icon: Option<&str>,
     ) -> AppResult<()> {
-        let current = match self.get_by_id(id)? {
-            Some(c) => c,
-            None => {
-                return Err(crate::error::AppError::NotFound(format!(
-                    "Project {} not found",
-                    id
-                )))
-            }
-        };
-        let new_name = name.unwrap_or(current["name"].as_str().unwrap_or(""));
-        let new_path = path.unwrap_or(current["path"].as_str().unwrap_or(""));
-        let new_tags = tags.or_else(|| current["tags"].as_str());
-        let new_icon = icon.or_else(|| current["icon"].as_str());
-        let new_category_id = if category_id.is_some() {
-            category_id
-        } else {
-            current["category_id"].as_i64()
-        };
         let conn = self.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute(
-            "UPDATE projects SET name = ?1, path = ?2, category_id = ?3, tags = ?4, icon = ?5, updated_at = CURRENT_TIMESTAMP
+        let changed = conn.execute(
+            "UPDATE projects SET
+                name = COALESCE(?1, name),
+                path = COALESCE(?2, path),
+                category_id = COALESCE(?3, category_id),
+                tags = COALESCE(?4, tags),
+                icon = COALESCE(?5, icon),
+                updated_at = CURRENT_TIMESTAMP
              WHERE id = ?6",
-            params![new_name, new_path, new_category_id, new_tags, new_icon, id],
+            params![name, path, category_id, tags, icon, id],
         )?;
+        if changed == 0 {
+            return Err(AppError::NotFound(format!("Project {} not found", id)));
+        }
         Ok(())
     }
 
@@ -157,4 +148,3 @@ impl ProjectsRepo {
     }
 }
 
-use crate::error::AppError;

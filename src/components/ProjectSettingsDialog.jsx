@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { FolderOpen, Loader2, Image as ImageIcon, Trash2, Download } from "lucide-react";
+import { toast } from "react-toastify";
 import {
   Select,
   SelectContent,

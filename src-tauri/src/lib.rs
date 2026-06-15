@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use crate::db::connection::establish_connection;
 use crate::db::projects_repo::ProjectsRepo;
@@ -69,7 +71,11 @@ pub fn run() {
             if let Some(parent) = db_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
+            // Restrict DB file permissions to owner-only (0600)
             let db = establish_connection(&db_path)?;
+            #[cfg(unix)]
+            if let Ok(()) = std::fs::set_permissions(&db_path, PermissionsExt::from_mode(0o600)) {
+            }
             let projects_repo = Arc::new(ProjectsRepo::new(db.clone()));
             let categories_repo = Arc::new(CategoriesRepo::new(db.clone()));
             let settings_service = Arc::new(SettingsService::new(db.clone()));
@@ -227,14 +233,8 @@ pub fn run() {
 // ===== PATH VALIDATION =====
 fn validate_project_path(path: &str, state: &AppState) -> AppResult<std::path::PathBuf> {
     let candidate = std::path::Path::new(path);
-    if !candidate.exists() {
-        return Err(AppError::PathSecurity(format!(
-            "path does not exist: {}",
-            path
-        )));
-    }
     let resolved = dunce::canonicalize(candidate)
-        .map_err(|e| AppError::PathSecurity(format!("failed to resolve path: {}", e)))?;
+        .map_err(|_| AppError::PathSecurity(format!("path does not exist or cannot be resolved: {}", path)))?;
     let projects = state
         .projects_repo
         .get_all()
@@ -366,12 +366,16 @@ async fn start_process(
     if parts.is_empty() {
         return Err(AppError::Validation("Empty command".into()));
     }
-    let output = tokio::process::Command::new(&parts[0])
-        .args(&parts[1..])
-        .current_dir(dir)
-        .output()
-        .await
-        .map_err(|e| AppError::Process(e.to_string()))?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        tokio::process::Command::new(&parts[0])
+            .args(&parts[1..])
+            .current_dir(dir)
+            .output(),
+    )
+    .await
+    .map_err(|_| AppError::Process("Command timed out after 300s".into()))?
+    .map_err(|e| AppError::Process(e.to_string()))?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
@@ -402,7 +406,6 @@ async fn restart_process(
     project_path: String,
     command: String,
 ) -> AppResult<String> {
-    let _ = stop_process(0).await;
     start_process(state, project_id, project_path, command).await
 }
 
@@ -600,10 +603,13 @@ fn git_pull(state: tauri::State<AppState>, project_path: String) -> AppResult<()
 
 #[tauri::command]
 fn git_clone(
-    _state: tauri::State<AppState>,
+    state: tauri::State<AppState>,
     url: String,
     dest_path: String,
 ) -> AppResult<()> {
+    let dest = std::path::Path::new(&dest_path);
+    let parent = dest.parent().unwrap_or(dest);
+    let _resolved = validate_project_path(&parent.to_string_lossy(), &state)?;
     crate::services::git_service::GitService::git_clone_remote(&url, &dest_path)
 }
 
@@ -1024,12 +1030,14 @@ async fn stop_lsp_server(
 #[tauri::command]
 async fn lsp_request(
     state: tauri::State<'_, AppState>,
+    project_path: String,
     method: String,
     params: serde_json::Value,
 ) -> AppResult<serde_json::Value> {
+    let _resolved = validate_project_path(&project_path, &state)?;
     state
         .lsp_bridge
-        .request(&method, params)
+        .request(&project_path, &method, params)
         .await
         .map_err(AppError::Internal)
 }
@@ -1047,12 +1055,14 @@ async fn start_lsp_proxy(
 
 // ===== SYSTEM COMMANDS =====
 #[tauri::command]
-fn open_file(path: String) -> AppResult<()> {
+fn open_file(state: tauri::State<AppState>, path: String) -> AppResult<()> {
+    let _resolved = validate_project_path(&path, &state)?;
     opener::open(&path).map_err(|e| AppError::Internal(e.to_string()))
 }
 
 #[tauri::command]
-fn open_folder(path: String) -> AppResult<()> {
+fn open_folder(state: tauri::State<AppState>, path: String) -> AppResult<()> {
+    let _resolved = validate_project_path(&path, &state)?;
     opener::open(&path).map_err(|e| AppError::Internal(e.to_string()))
 }
 
@@ -1092,10 +1102,14 @@ async fn refresh_tray_menu(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> AppResult<()> {
-    let projects = state
-        .projects_repo
-        .get_all()
-        .map_err(|e| AppError::Database(e.to_string()))?;
+    let projects_repo = state.projects_repo.clone();
+    let projects = tokio::task::spawn_blocking(move || {
+        projects_repo
+            .get_all()
+            .map_err(|e| AppError::Database(e.to_string()))
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
     tray::rebuild_tray_with_projects(&app, projects)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
@@ -1146,7 +1160,8 @@ async fn export_tunnel_logs_project(
     project_id: String,
 ) -> AppResult<String> {
     let logs = state.tunnel_manager.get_logs(&project_id).await;
-    Ok(serde_json::to_string_pretty(&logs).unwrap_or_default())
+    serde_json::to_string_pretty(&logs)
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 #[tauri::command]
@@ -1161,7 +1176,8 @@ async fn export_console_logs_project(
     project_id: String,
 ) -> AppResult<String> {
     let logs = state.log_store.get_history(&project_id).await;
-    Ok(serde_json::to_string_pretty(&logs).unwrap_or_default())
+    serde_json::to_string_pretty(&logs)
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 #[tauri::command]
@@ -1191,7 +1207,10 @@ fn minimize_window(app: tauri::AppHandle) -> AppResult<()> {
 #[tauri::command]
 fn toggle_maximize(app: tauri::AppHandle) -> AppResult<()> {
     if let Some(w) = app.get_webview_window("main") {
-        if w.is_maximized().unwrap_or(false) {
+        let is_maximized = w
+            .is_maximized()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        if is_maximized {
             w.unmaximize()
                 .map_err(|e| AppError::Internal(e.to_string()))?;
         } else {
@@ -1219,7 +1238,7 @@ async fn select_file() -> AppResult<Option<String>> {
 #[tauri::command]
 fn get_settings(state: tauri::State<AppState>) -> AppResult<serde_json::Value> {
     let s = state.settings_service.get_app_settings()?;
-    Ok(serde_json::to_value(s).unwrap_or_default())
+    serde_json::to_value(s).map_err(|e| AppError::Internal(e.to_string()))
 }
 
 // ===== PATH JOIN UTILITY =====

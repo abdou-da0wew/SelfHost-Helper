@@ -13,7 +13,6 @@ pub struct FileChangeEvent {
 }
 
 pub struct FileWatcher {
-    #[allow(dead_code)]
     watcher: Arc<RwLock<Option<RecommendedWatcher>>>,
     event_tx: mpsc::Sender<FileChangeEvent>,
     watched_dirs: Arc<RwLock<Vec<PathBuf>>>,
@@ -29,10 +28,11 @@ impl FileWatcher {
     }
 
     pub async fn watch(&self, paths: Vec<String>) -> Result<(), String> {
-        let mut watcher_guard = self.watcher.write().await;
-        if watcher_guard.is_some() {
+        if self.watcher.read().await.is_some() {
             self.unwatch_all().await?;
         }
+
+        let mut watcher_guard = self.watcher.write().await;
 
         let tx = self.event_tx.clone();
         let mut watcher = RecommendedWatcher::new(
@@ -50,7 +50,7 @@ impl FileWatcher {
                         .filter_map(|p| p.to_str().map(|s| s.to_string()))
                         .collect();
                     if !paths.is_empty() {
-                        let _ = tx.blocking_send(FileChangeEvent {
+                        let _ = tx.try_send(FileChangeEvent {
                             kind: kind.to_string(),
                             paths,
                             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -80,7 +80,9 @@ impl FileWatcher {
         let mut watcher_guard = self.watcher.write().await;
         if let Some(mut watcher) = watcher_guard.take() {
             for dir in self.watched_dirs.write().await.drain(..) {
-                let _ = watcher.unwatch(&dir);
+                if let Err(e) = watcher.unwatch(&dir) {
+                    eprintln!("[file_watcher] failed to unwatch {:?}: {}", dir, e);
+                }
             }
         }
         Ok(())

@@ -162,6 +162,9 @@ export default function TunnelView(props) {
       if (!res.success) {
         toast.error(`Failed to start tunnel: ${res.message}`);
       }
+    } catch (err) {
+      console.error("Failed to start tunnel:", err);
+      toast.error("Failed to start tunnel");
     } finally {
       setIsProcessing(false);
     }
@@ -174,6 +177,9 @@ export default function TunnelView(props) {
       if (!res.success) {
         toast.error(`Failed to stop tunnel: ${res.message}`);
       }
+    } catch (err) {
+      console.error("Failed to stop tunnel:", err);
+      toast.error("Failed to stop tunnel");
     } finally {
       setIsProcessing(false);
     }

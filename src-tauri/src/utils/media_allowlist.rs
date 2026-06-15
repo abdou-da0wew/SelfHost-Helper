@@ -113,9 +113,6 @@ impl MediaAllowlist {
         }
         let resolved = crate::utils::path_security::resolve_and_validate(file_path, &bases)
             .ok_or(MediaAllowlistError::PathOutsideAllowlist)?;
-        if !resolved.exists() {
-            return Err(MediaAllowlistError::FileNotFound);
-        }
         Ok(resolved)
     }
 }

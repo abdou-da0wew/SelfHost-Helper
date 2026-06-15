@@ -7,9 +7,9 @@ if (!window.__TAURI__) {
   console.error("[tauri-bridge] Tauri APIs not available — bridge not loaded");
 }
 
-function safeInvoke(cmd, args) {
+async function safeInvoke(cmd, args) {
   try {
-    return invoke(cmd, args);
+    return await invoke(cmd, args);
   } catch (err) {
     console.error(`[tauri-bridge] invoke('${cmd}') failed:`, err);
     throw err;
@@ -297,78 +297,183 @@ window.api = {
   // ===== EVENTS =====
   onLog: (callback) => {
     let unlisten = () => {};
-    listen("project:log", (e) => callback(e.payload)).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("project:log", (e) => callback(e.payload)).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onLogsBatch: (callback) => {
     let unlisten = () => {};
-    listen("project:logs-batch", (e) => callback(e.payload)).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("project:logs-batch", (e) => callback(e.payload)).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onStatusChange: (callback) => {
     let unlisten = () => {};
-    listen("project:status", (e) => callback(e.payload)).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("project:status", (e) => callback(e.payload)).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onProjectStatusSync: (callback) => {
     let unlisten = () => {};
-    listen("project:status-sync", (e) => callback(e.payload)).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("project:status-sync", (e) => callback(e.payload)).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onProjectsChange: (callback) => {
     let unlisten = () => {};
-    listen("projects:list-changed", () => callback()).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("projects:list-changed", () => callback()).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onLogsCleared: (callback) => {
     let unlisten = () => {};
-    listen("project:logs-cleared", (e) => callback(e.payload)).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("project:logs-cleared", (e) => callback(e.payload)).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onFileChange: (callback) => {
     let unlisten = () => {};
-    listen("file-changed", (e) => callback(e.payload)).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("file-changed", (e) => callback(e.payload)).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onTunnelStatus: (callback) => {
     let unlisten = () => {};
-    listen("tunnel:status", (e) => callback(e.payload)).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("tunnel:status", (e) => callback(e.payload)).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onTunnelLog: (callback) => {
     let unlisten = () => {};
-    listen("tunnel:log", (e) => callback(e.payload)).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("tunnel:log", (e) => callback(e.payload)).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onProjectStats: (callback) => {
     let unlisten = () => {};
-    listen("project:stats", (e) => callback(e.payload)).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("project:stats", (e) => callback(e.payload)).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onMaximize: (callback) => {
     let unlisten = () => {};
-    listen("tauri://maximize", () => callback()).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("tauri://maximize", () => callback()).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onUnmaximize: (callback) => {
     let unlisten = () => {};
-    listen("tauri://unmaximize", () => callback()).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("tauri://unmaximize", () => callback()).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onShutdown: (callback) => {
     let unlisten = () => {};
-    listen("tauri://close-requested", () => callback()).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("tauri://close-requested", () => callback()).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onUpdaterStatus: (callback) => {
     let unlisten = () => {};
-    listen("update-available", (e) => callback(e.payload)).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("update-available", (e) => callback(e.payload)).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
   onRuntimeProgress: (callback) => {
     let unlisten = () => {};
-    listen("runtime:progress", (e) => callback(e.payload)).then((fn) => { unlisten = fn; });
-    return () => unlisten();
+    let cancelled = false;
+    listen("runtime:progress", (e) => callback(e.payload)).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten();
+    };
   },
 
   // ===== REMOVE ALL LISTENERS =====

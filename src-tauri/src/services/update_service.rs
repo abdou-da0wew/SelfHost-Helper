@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::Emitter;
 use tauri_plugin_updater::UpdaterExt;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateInfo {
@@ -20,15 +20,16 @@ pub struct UpdateStatus {
 }
 
 pub struct UpdateService {
-    #[allow(dead_code)]
     app_handle: tauri::AppHandle,
     status: Arc<RwLock<UpdateStatus>>,
-    #[allow(dead_code)]
     check_interval_secs: u64,
+    check_guard: Arc<Semaphore>,
+    cancel_token: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl UpdateService {
     pub fn new(app_handle: tauri::AppHandle) -> Self {
+        let (cancel_tx, _) = tokio::sync::watch::channel(false);
         Self {
             app_handle,
             status: Arc::new(RwLock::new(UpdateStatus {
@@ -37,10 +38,18 @@ impl UpdateService {
                 error: None,
             })),
             check_interval_secs: 86400,
+            check_guard: Arc::new(Semaphore::new(1)),
+            cancel_token: Arc::new(cancel_tx),
         }
     }
 
     pub async fn check_for_updates(&self) -> AppResult<Option<UpdateInfo>> {
+        let _permit = self
+            .check_guard
+            .acquire()
+            .await
+            .map_err(|_| AppError::Internal("Update check already in progress".into()))?;
+
         *self.status.write().await = UpdateStatus {
             status: "checking".into(),
             update: None,
@@ -51,7 +60,14 @@ impl UpdateService {
             .app_handle
             .updater()
             .map_err(|e| AppError::Internal(format!("Updater init failed: {}", e)))?;
-        match updater.check().await {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            updater.check(),
+        )
+        .await
+        .map_err(|_| AppError::Internal("Update check timed out".into()))?;
+
+        match result {
             Ok(Some(update)) => {
                 let info = UpdateInfo {
                     version: update.version.clone(),
@@ -97,11 +113,21 @@ impl UpdateService {
             .app_handle
             .updater()
             .map_err(|e| AppError::Internal(format!("Update check failed: {}", e)))?;
-        match updater.check().await {
-            Ok(Some(update)) => update
-                .download_and_install(|_, _| {}, || {})
-                .await
-                .map_err(|e| AppError::Internal(format!("Update install failed: {}", e))),
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            updater.check(),
+        )
+        .await
+        .map_err(|_| AppError::Internal("Update check timed out".into()))?;
+
+        match result {
+            Ok(Some(update)) => tokio::time::timeout(
+                std::time::Duration::from_secs(600),
+                update.download_and_install(|_, _| {}, || {}),
+            )
+            .await
+            .map_err(|_| AppError::Internal("Download timed out".into()))?
+            .map_err(|e| AppError::Internal(format!("Update install failed: {}", e))),
             Ok(None) => Err(AppError::Validation("No update available".into())),
             Err(e) => Err(AppError::Internal(format!(
                 "Update check failed: {}",
@@ -122,13 +148,24 @@ impl UpdateService {
         let status = self.status.clone();
         let handle = self.app_handle.clone();
         let interval = self.check_interval_secs;
+        let mut cancel_rx = self.cancel_token.subscribe();
         tokio::spawn(async move {
             let mut interval_timer =
                 tokio::time::interval(tokio::time::Duration::from_secs(interval));
             loop {
-                interval_timer.tick().await;
+                tokio::select! {
+                    _ = interval_timer.tick() => {}
+                    _ = cancel_rx.changed() => {
+                        break;
+                    }
+                }
                 if let Ok(updater) = handle.updater() {
-                    if let Ok(Some(update)) = updater.check().await {
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(60),
+                        updater.check(),
+                    )
+                    .await;
+                    if let Ok(Ok(Some(update))) = result {
                         let info = UpdateInfo {
                             version: update.version.clone(),
                             date: update.date.map(|d| d.to_string()),
@@ -144,5 +181,11 @@ impl UpdateService {
                 }
             }
         });
+    }
+}
+
+impl Drop for UpdateService {
+    fn drop(&mut self) {
+        let _ = self.cancel_token.send(true);
     }
 }

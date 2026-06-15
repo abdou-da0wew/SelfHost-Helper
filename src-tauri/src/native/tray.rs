@@ -142,7 +142,13 @@ pub async fn rebuild_tray_with_projects(
     }
     projects_menu = projects_menu.separator();
     projects_menu = projects_menu
-        .item(&MenuItemBuilder::with_id("project_add", "Add Project").build(app)?);
+        .item(&MenuItemBuilder::with_id("project_add", "Add Project").build(app)?)
+        .item(&MenuItemBuilder::with_id("project_open", "Open Selected").build(app)?)
+        .item(&MenuItemBuilder::with_id("project_open_dir", "Open Directory").build(app)?)
+        .separator()
+        .item(&MenuItemBuilder::with_id("project_stop", "Stop Process").build(app)?)
+        .item(&MenuItemBuilder::with_id("project_start", "Start Process").build(app)?)
+        .item(&MenuItemBuilder::with_id("project_restart", "Restart Process").build(app)?);
 
     let show = MenuItemBuilder::with_id("show", "Show Window").build(app)?;
     let hide = MenuItemBuilder::with_id("hide", "Hide Window").build(app)?;

@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 pub struct CategoriesRepo {
     db: Arc<Mutex<Connection>>,
@@ -60,22 +60,18 @@ impl CategoriesRepo {
     }
 
     pub fn update(&self, id: i64, name: Option<&str>, color: Option<&str>) -> AppResult<()> {
-        let current = match self.get_by_id(id)? {
-            Some(c) => c,
-            None => {
-                return Err(crate::error::AppError::NotFound(format!(
-                    "Category {} not found",
-                    id
-                )))
-            }
-        };
-        let new_name = name.unwrap_or(current["name"].as_str().unwrap_or(""));
-        let new_color = color.or_else(|| current["color"].as_str());
         let conn = self.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute(
-            "UPDATE categories SET name = ?1, color = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
-            params![new_name, new_color, id],
+        let changed = conn.execute(
+            "UPDATE categories SET
+                name = COALESCE(?1, name),
+                color = COALESCE(?2, color),
+                updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?3",
+            params![name, color, id],
         )?;
+        if changed == 0 {
+            return Err(AppError::NotFound(format!("Category {} not found", id)));
+        }
         Ok(())
     }
 
@@ -93,4 +89,3 @@ impl CategoriesRepo {
     }
 }
 
-use crate::error::AppError;

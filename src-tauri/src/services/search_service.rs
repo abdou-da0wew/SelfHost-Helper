@@ -56,7 +56,7 @@ impl SearchService {
             "--line-number".to_string(),
             "--column-number".to_string(),
             "--max-count".to_string(),
-            max_results.to_string(),
+            (max_results * 2).to_string(),
             "--hidden".to_string(),
         ];
 
@@ -79,16 +79,18 @@ impl SearchService {
 
         let rg_path = resolve_sidecar(&self.app_handle, "rg")?;
 
-        let output = Command::new(rg_path)
-            .args(&args)
-            .output()
-            .await
-            .map_err(|e| {
-                AppError::Search(format!(
-                    "Failed to run rg: {}. Ensure ripgrep is installed.",
-                    e
-                ))
-            })?;
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            Command::new(rg_path).args(&args).output(),
+        )
+        .await
+        .map_err(|_| AppError::Search("Search timed out after 120s".into()))?
+        .map_err(|e| {
+            AppError::Search(format!(
+                "Failed to run rg: {}. Ensure ripgrep is installed.",
+                e
+            ))
+        })?;
 
         if !output.status.success() && output.stdout.is_empty() {
             return Ok((
@@ -108,6 +110,9 @@ impl SearchService {
         for line in stdout.lines() {
             if line.is_empty() {
                 continue;
+            }
+            if results.len() >= max_results {
+                break;
             }
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
                 if let Some(submatches) = json.get("submatches").and_then(|s| s.as_array()) {
@@ -169,10 +174,11 @@ impl SearchService {
             .into_iter()
             .filter(|r| !is_path_ignored(Path::new(&r.file)))
             .collect();
+        let total = filtered.len();
         Ok((
-            filtered.clone(),
+            filtered,
             SearchStats {
-                total_matches: filtered.len(),
+                total_matches: total,
                 files_with_matches: files_set.len(),
                 duration_ms: duration,
             },

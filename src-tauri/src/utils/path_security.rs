@@ -79,7 +79,7 @@ pub struct MediaUrl {
 pub fn parse_media_url(
     request_url: &str,
     app_base: &Path,
-    cwd_base: &Path,
+    _cwd_base: &Path,
 ) -> Result<MediaUrl, PathSecurityError> {
     let without_scheme = request_url
         .strip_prefix("media://")
@@ -98,12 +98,7 @@ pub fn parse_media_url(
         let relative = decoded
             .trim_start_matches('/')
             .trim_start_matches('\\');
-        let app_candidate = app_base.join(relative);
-        let file_path = if app_candidate.exists() {
-            app_candidate
-        } else {
-            cwd_base.join(relative)
-        };
+        let file_path = app_base.join(relative);
         Ok(MediaUrl {
             hostname,
             file_path,

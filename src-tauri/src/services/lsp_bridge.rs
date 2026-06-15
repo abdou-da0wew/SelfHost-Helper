@@ -2,7 +2,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, RwLock};
@@ -16,15 +16,12 @@ pub struct LspRequest {
 
 pub struct LspBridge {
     sessions: Arc<RwLock<HashMap<String, LspSession>>>,
-    #[allow(dead_code)]
     proxy_port: Arc<RwLock<Option<u16>>>,
 }
 
 struct LspSession {
-    #[allow(dead_code)]
     child: Child,
     stdin_tx: mpsc::Sender<Vec<u8>>,
-    #[allow(dead_code)]
     pending: Arc<RwLock<HashMap<u64, oneshot::Sender<serde_json::Value>>>>,
     next_id: Arc<RwLock<u64>>,
 }
@@ -74,13 +71,9 @@ impl LspBridge {
                             let text = msg.to_text().unwrap_or("");
                             if let Ok(req) = serde_json::from_str::<LspRequest>(text) {
                                 let sessions = sessions.read().await;
-                                let mut found_session = None;
-                                for (_, session) in sessions.iter() {
-                                    found_session = Some(session);
-                                    break;
-                                }
-                                if let Some(session) = found_session {
-                                    let result = session.request(&req.method, req.params).await;
+                                if let Some((_, session)) = sessions.iter().next() {
+                                    let result =
+                                        session.request(&req.method, req.params).await;
                                     let response = serde_json::json!({
                                         "jsonrpc": "2.0",
                                         "id": req.id,
@@ -116,6 +109,12 @@ impl LspBridge {
         if !path.is_dir() {
             return Err("Invalid project path".into());
         }
+
+        // Kill existing session for this project path if any
+        if let Some(mut old) = self.sessions.write().await.remove(project_path) {
+            let _ = old.child.kill().await;
+        }
+
         let mut child = Command::new(server_command)
             .args(&args)
             .current_dir(project_path)
@@ -140,16 +139,45 @@ impl LspBridge {
             }
         });
 
-        let _pending_for_read = pending.clone();
+        let pending_for_read = pending.clone();
         tokio::spawn(async move {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            let mut _content_length: Option<usize> = None;
-            while let Ok(Some(line)) = lines.next_line().await {
-                if line.is_empty() {
-                    _content_length = None;
-                } else if let Some(val) = line.strip_prefix("Content-Length: ") {
-                    _content_length = val.trim().parse().ok();
+            let mut reader = BufReader::new(stdout);
+            loop {
+                // Read LSP headers (Content-Length: N)
+                let mut content_length: Option<usize> = None;
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) => return,
+                        Ok(_) => {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                break;
+                            }
+                            if let Some(val) = trimmed.strip_prefix("Content-Length: ") {
+                                content_length = val.trim().parse().ok();
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+
+                // Read and parse the JSON body
+                if let Some(len) = content_length {
+                    let mut body = vec![0u8; len];
+                    if reader.read_exact(&mut body).await.is_err() {
+                        return;
+                    }
+                    if let Ok(response) =
+                        serde_json::from_slice::<serde_json::Value>(&body)
+                    {
+                        if let Some(id) = response.get("id").and_then(|i| i.as_u64()) {
+                            let mut pending = pending_for_read.write().await;
+                            if let Some(tx) = pending.remove(&id) {
+                                let _ = tx.send(response);
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -170,14 +198,14 @@ impl LspBridge {
 
     pub async fn request(
         &self,
+        project_path: &str,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         let sessions = self.sessions.read().await;
         let session = sessions
-            .values()
-            .next()
-            .ok_or("No active LSP session")?;
+            .get(project_path)
+            .ok_or_else(|| format!("No active LSP session for {}", project_path))?;
         session.request(method, params).await
     }
 

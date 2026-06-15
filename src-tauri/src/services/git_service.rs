@@ -105,10 +105,15 @@ impl GitService {
         if current_branch == branch_name {
             return Ok(());
         }
-        repo.set_head(&format!("refs/heads/{}", branch_name))
-            .map_err(|e| {
-                AppError::Git(format!("Failed to checkout branch {}: {}", branch_name, e))
-            })?;
+        let branch_ref = repo
+            .find_branch(branch_name, git2::BranchType::Local)?
+            .into_reference();
+        let commit = branch_ref.peel_to_commit()?;
+        repo.checkout_tree(commit.as_object(), None)
+            .map_err(|e| AppError::Git(format!("Failed to checkout tree: {}", e)))?;
+        repo.set_head(branch_ref.name().ok_or_else(|| {
+            AppError::Git("Invalid branch name".into())
+        })?)?;
         Ok(())
     }
 
@@ -205,14 +210,58 @@ impl GitService {
 
     pub fn pull(&self, project_path: &str) -> AppResult<()> {
         let repo = self.get_repo(project_path)?;
-        let mut remote = repo.find_remote("origin")?;
         let branch = repo.head()?.shorthand().unwrap_or("main").to_string();
+        let mut remote = repo.find_remote("origin")?;
         remote.fetch(&[branch.as_str()], None, None)?;
-        let fetch_oid = repo.refname_to_id("FETCH_HEAD")?;
-        let fetch_commit = repo.find_commit(fetch_oid)?;
-        repo.branch(&branch, &fetch_commit, false)?;
-        repo.set_head(&format!("refs/heads/{}", branch))?;
-        repo.checkout_tree(fetch_commit.as_object(), None)?;
+        let fetch_commit = repo
+            .find_reference("FETCH_HEAD")?
+            .peel_to_commit()?;
+        let head_commit = repo.head()?.peel_to_commit()?;
+
+        if head_commit.id() == fetch_commit.id() {
+            return Ok(());
+        }
+
+        let merge_base = repo.merge_base(head_commit.id(), fetch_commit.id())?;
+        if merge_base == head_commit.id() {
+            // Fast-forward
+            repo.head()?
+                .set_target(fetch_commit.id(), "fast-forward merge")?;
+            repo.checkout_tree(fetch_commit.as_object(), None)?;
+        } else {
+            // 3-way merge
+            let annotated = repo.find_annotated_commit(fetch_commit.id())?;
+            let mut merge_opts = git2::MergeOptions::new();
+            repo.merge(
+                &[&annotated],
+                Some(&mut merge_opts),
+                None,
+            )
+            .map_err(|e| {
+                if repo.index().is_ok_and(|i| i.has_conflicts()) {
+                    AppError::Git("Merge conflicts detected — resolve manually".into())
+                } else {
+                    AppError::Git(format!("Merge failed: {}", e))
+                }
+            })?;
+            if repo.index()?.has_conflicts() {
+                return Err(AppError::Git(
+                    "Merge conflicts detected — resolve manually".into(),
+                ));
+            }
+            let tree_oid = repo.index()?.write_tree()?;
+            let tree = repo.find_tree(tree_oid)?;
+            let sig =
+                git2::Signature::now("SelfHost Helper", "dev@selfhost")?;
+            repo.commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                &format!("Merge remote-tracking branch 'origin/{}'", branch),
+                &tree,
+                &[&head_commit, &fetch_commit],
+            )?;
+        }
         Ok(())
     }
 

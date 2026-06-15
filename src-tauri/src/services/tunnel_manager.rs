@@ -15,10 +15,6 @@ struct TunnelInstance {
     mode: String,
     url: Option<String>,
     child: Option<Child>,
-    #[allow(dead_code)]
-    log_sender: mpsc::Sender<TunnelLogEntry>,
-    #[allow(dead_code)]
-    stopping: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -67,10 +63,6 @@ impl TunnelManager {
         token: Option<String>,
         config: Option<HashMap<String, String>>,
     ) -> AppResult<()> {
-        let mut running = self.running.write().await;
-        if running.contains_key(&project_id) {
-            return Err(AppError::Validation("Tunnel already running".into()));
-        }
         if port == 0 {
             return Err(AppError::Validation("Invalid port".into()));
         }
@@ -78,22 +70,28 @@ impl TunnelManager {
             return Err(AppError::Validation("Invalid project ID".into()));
         }
 
+        {
+            let running = self.running.read().await;
+            if running.contains_key(&project_id) {
+                return Err(AppError::Validation("Tunnel already running".into()));
+            }
+        }
+
         self.send_status(&project_id, "connecting", None, None, None)
             .await;
 
-        let mut args = vec![
-            "tunnel".to_string(),
-            "--url".to_string(),
-            format!("http://localhost:{}", port),
-        ];
+        let cloudflared_path = resolve_sidecar(&self.app_handle, "cloudflared")?;
 
+        let mut args: Vec<String> = Vec::new();
         if mode == "authenticated" {
             let tok = token.ok_or_else(|| AppError::Validation("Token required".into()))?;
             if tok.is_empty() || tok.len() > 2048 {
                 return Err(AppError::Validation("Invalid token".into()));
             }
-            args.insert(0, "tunnel".to_string());
-            args.insert(1, "run".to_string());
+            args.push("tunnel".to_string());
+            args.push("run".to_string());
+            args.push("--url".to_string());
+            args.push(format!("http://localhost:{}", port));
             args.push("--token".to_string());
             args.push(tok);
 
@@ -122,18 +120,18 @@ impl TunnelManager {
                     args.push(host.clone());
                 }
             }
+        } else {
+            args.push("tunnel".to_string());
+            args.push("--url".to_string());
+            args.push(format!("http://localhost:{}", port));
         }
-
-        let cloudflared_path = resolve_sidecar(&self.app_handle, "cloudflared")?;
 
         let child = Command::new(cloudflared_path)
             .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| AppError::Process(format!("Failed to spawn cloudflared: {}", e)))?;
-
-        let (log_tx, _log_rx) = mpsc::channel::<TunnelLogEntry>(100);
 
         let inst = TunnelInstance {
             project_id: project_id.clone(),
@@ -141,20 +139,21 @@ impl TunnelManager {
             mode,
             url: None,
             child: Some(child),
-            log_sender: log_tx,
-            stopping: false,
         };
 
-        running.insert(project_id.clone(), inst);
+        {
+            let mut running = self.running.write().await;
+            running.insert(project_id.clone(), inst);
+        }
 
         let running_ref = self.running.clone();
-        let _logs_ref = self.logs.clone();
         let event_tx = self.event_tx.clone();
         let pid_clone = project_id.clone();
 
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
+            let mut child_died = false;
             if let Some(inst) = running_ref.write().await.get_mut(&pid_clone) {
                 if let Some(ref mut child) = inst.child {
                     match child.try_wait() {
@@ -169,41 +168,54 @@ impl TunnelManager {
                                 })
                                 .await;
                             running_ref.write().await.remove(&pid_clone);
-                            return;
+                            child_died = true;
                         }
                         _ => {}
                     }
                 }
             }
 
-            let _ = event_tx
-                .send(TunnelStatus {
-                    project_id: pid_clone.clone(),
-                    status: "running".into(),
-                    url: Some(format!("https://{}.trycloudflare.com", pid_clone)),
-                    port: Some(port),
-                    error: None,
-                })
-                .await;
+            if !child_died {
+                let _ = event_tx
+                    .send(TunnelStatus {
+                        project_id: pid_clone.clone(),
+                        status: "running".into(),
+                        url: Some(format!("https://{}.trycloudflare.com", pid_clone)),
+                        port: Some(port),
+                        error: None,
+                    })
+                    .await;
+            }
         });
 
         Ok(())
     }
 
     pub async fn stop_tunnel(&self, project_id: &str) -> AppResult<()> {
-        let mut running = self.running.write().await;
-        let inst = running
-            .get_mut(project_id)
-            .ok_or_else(|| AppError::NotFound("No tunnel running".into()))?;
-        inst.stopping = true;
-        if let Some(ref mut child) = inst.child {
+        let (child_to_kill, exists) = {
+            let mut running = self.running.write().await;
+            match running.get_mut(project_id) {
+                Some(inst) => {
+                    let child = inst.child.take();
+                    running.remove(project_id);
+                    (child, true)
+                }
+                None => (None, false),
+            }
+        };
+
+        if !exists {
+            return Err(AppError::NotFound("No tunnel running".into()));
+        }
+
+        if let Some(mut child) = child_to_kill {
             child
                 .kill()
                 .await
                 .map_err(|e| AppError::Process(e.to_string()))?;
+            let _ = child.wait().await;
         }
-        running.remove(project_id);
-        drop(running);
+
         self.send_status(project_id, "stopped", None, None, None)
             .await;
         Ok(())
@@ -214,6 +226,7 @@ impl TunnelManager {
         for (_, mut inst) in running.drain() {
             if let Some(ref mut child) = inst.child {
                 let _ = child.kill().await;
+                let _ = child.wait().await;
             }
         }
     }
@@ -268,5 +281,32 @@ impl TunnelManager {
                 error,
             })
             .await;
+    }
+}
+
+impl Drop for TunnelManager {
+    fn drop(&mut self) {
+        if let Ok(mut running) = self.running.try_write() {
+            for (_key, mut inst) in running.drain() {
+                if let Some(ref mut child) = inst.child {
+                    #[cfg(unix)]
+                    {
+                        use nix::sys::signal::{kill, Signal};
+                        use nix::unistd::Pid;
+                        if let Some(pid) = child.id() {
+                            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                        }
+                    }
+                    #[cfg(windows)]
+                    {
+                        if let Some(pid) = child.id() {
+                            let _ = std::process::Command::new("taskkill")
+                                .args(&["/F", "/PID", &pid.to_string()])
+                                .output();
+                        }
+                    }
+                }
+            }
+        }
     }
 }

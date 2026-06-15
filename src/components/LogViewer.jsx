@@ -82,7 +82,6 @@ export default function LogViewer(props) {
     });
 
     term.open(terminalContainerRef.current);
-    term.open(terminalContainerRef.current);
     requestAnimationFrame(() => {
       try {
         fitAddon.fit();

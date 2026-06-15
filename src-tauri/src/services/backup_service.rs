@@ -30,6 +30,12 @@ impl BackupService {
         settings_service: std::sync::Arc<crate::services::settings_service::SettingsService>,
     ) -> Self {
         std::fs::create_dir_all(&backup_dir).ok();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(()) = std::fs::set_permissions(&backup_dir, PermissionsExt::from_mode(0o700)) {
+            }
+        }
         Self {
             backup_dir,
             settings_service,

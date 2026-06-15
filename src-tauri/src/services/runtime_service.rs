@@ -95,7 +95,13 @@ impl RuntimeService {
         }
         std::fs::create_dir_all(&target_dir).map_err(AppError::Io)?;
 
-        let url = self.get_node_download_url(version)?;
+        let url = match self.get_node_download_url(version) {
+            Ok(u) => u,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&target_dir);
+                return Err(e);
+            }
+        };
 
         if let Some(tx) = &progress_tx {
             let _ = tx
@@ -107,10 +113,19 @@ impl RuntimeService {
                 .await;
         }
 
-        let response = reqwest::get(&url).await.map_err(AppError::Http)?;
-        let bytes = response.bytes().await.map_err(AppError::Http)?;
+        let response = reqwest::get(&url).await.map_err(|e| {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            AppError::Http(e)
+        })?;
+        let bytes = response.bytes().await.map_err(|e| {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            AppError::Http(e)
+        })?;
         let zip_path = target_dir.with_extension("zip");
-        std::fs::write(&zip_path, &bytes).map_err(AppError::Io)?;
+        std::fs::write(&zip_path, &bytes).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            AppError::Io(e)
+        })?;
 
         if let Some(tx) = &progress_tx {
             let _ = tx
@@ -122,13 +137,21 @@ impl RuntimeService {
                 .await;
         }
 
-        let file = std::fs::File::open(&zip_path).map_err(AppError::Io)?;
-        let mut archive =
-            zip::ZipArchive::new(file).map_err(|e| AppError::Internal(e.to_string()))?;
-        archive
-            .extract(&target_dir)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let extract_result = {
+            let file = std::fs::File::open(&zip_path).map_err(AppError::Io)?;
+            let mut archive =
+                zip::ZipArchive::new(file).map_err(|e| AppError::Internal(e.to_string()))?;
+            archive
+                .extract(&target_dir)
+                .map_err(|e| AppError::Internal(e.to_string()))
+        };
+
         let _ = std::fs::remove_file(&zip_path);
+
+        if let Err(e) = extract_result {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            return Err(e);
+        }
 
         if let Some(tx) = &progress_tx {
             let _ = tx
@@ -155,7 +178,13 @@ impl RuntimeService {
         }
         std::fs::create_dir_all(&target_dir).map_err(AppError::Io)?;
 
-        let url = self.get_python_download_url(version)?;
+        let url = match self.get_python_download_url(version) {
+            Ok(u) => u,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&target_dir);
+                return Err(e);
+            }
+        };
 
         if let Some(tx) = &progress_tx {
             let _ = tx
@@ -167,10 +196,19 @@ impl RuntimeService {
                 .await;
         }
 
-        let response = reqwest::get(&url).await.map_err(AppError::Http)?;
-        let bytes = response.bytes().await.map_err(AppError::Http)?;
+        let response = reqwest::get(&url).await.map_err(|e| {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            AppError::Http(e)
+        })?;
+        let bytes = response.bytes().await.map_err(|e| {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            AppError::Http(e)
+        })?;
         let zip_path = target_dir.with_extension("zip");
-        std::fs::write(&zip_path, &bytes).map_err(AppError::Io)?;
+        std::fs::write(&zip_path, &bytes).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            AppError::Io(e)
+        })?;
 
         if let Some(tx) = &progress_tx {
             let _ = tx
@@ -182,13 +220,21 @@ impl RuntimeService {
                 .await;
         }
 
-        let file = std::fs::File::open(&zip_path).map_err(AppError::Io)?;
-        let mut archive =
-            zip::ZipArchive::new(file).map_err(|e| AppError::Internal(e.to_string()))?;
-        archive
-            .extract(&target_dir)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let extract_result = {
+            let file = std::fs::File::open(&zip_path).map_err(AppError::Io)?;
+            let mut archive =
+                zip::ZipArchive::new(file).map_err(|e| AppError::Internal(e.to_string()))?;
+            archive
+                .extract(&target_dir)
+                .map_err(|e| AppError::Internal(e.to_string()))
+        };
+
         let _ = std::fs::remove_file(&zip_path);
+
+        if let Err(e) = extract_result {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            return Err(e);
+        }
 
         if let Some(tx) = &progress_tx {
             let _ = tx
@@ -211,10 +257,11 @@ impl RuntimeService {
             _ => return Err(AppError::Validation("Unknown runtime".into())),
         };
         let target = base_dir.join(version);
-        if target.exists() {
-            std::fs::remove_dir_all(&target).map_err(AppError::Io)?;
+        match std::fs::remove_dir_all(&target) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(AppError::Io(e)),
         }
-        Ok(())
     }
 
     pub async fn get_available_node_versions(&self) -> AppResult<Vec<String>> {

@@ -16,7 +16,7 @@ pub fn resolve_sidecar(app_handle: &tauri::AppHandle, name: &str) -> AppResult<P
     // 1. Try resource dir (production / bundled)
     if let Ok(resource_dir) = app_handle.path().resource_dir() {
         let path = resource_dir.join("binaries").join(&binary_name);
-        if path.exists() {
+        if path.try_exists().unwrap_or(false) {
             return Ok(path);
         }
     }
@@ -32,21 +32,23 @@ pub fn resolve_sidecar(app_handle: &tauri::AppHandle, name: &str) -> AppResult<P
                 .join("..")
                 .join("binaries")
                 .join(&binary_name);
-            if dev_path.exists() {
+            if dev_path.try_exists().unwrap_or(false) {
                 return Ok(dev_path);
             }
 
             // Also try alongside the exe (flat layout)
             let flat_path = exe_dir.join("binaries").join(&binary_name);
-            if flat_path.exists() {
+            if flat_path.try_exists().unwrap_or(false) {
                 return Ok(flat_path);
             }
         }
     }
 
-    // 3. PATH fallback
-    if let Ok(path) = which::which(name) {
-        return Ok(path);
+    // 3. PATH fallback (only in dev mode — in production binaries must be bundled)
+    if cfg!(debug_assertions) {
+        if let Ok(path) = which::which(name) {
+            return Ok(path);
+        }
     }
 
     Err(AppError::Process(format!(
