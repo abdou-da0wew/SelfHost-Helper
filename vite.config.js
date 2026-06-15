@@ -4,6 +4,7 @@ import path from "path";
 
 export default defineConfig({
   plugins: [react()],
+  clearScreen: false,
   base: "./",
   resolve: {
     alias: {
@@ -20,11 +21,19 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    watch: {
+      ignored: ["**/src-tauri/**"],
+    },
   },
   build: {
     outDir: "dist",
     emptyOutDir: true,
     sourcemap: false,
     cssMinify: "esbuild",
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "index.html"),
+      },
+    },
   },
 });
